@@ -1,4 +1,5 @@
 #include "raft/proto.h"
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <raft/raft.h>
@@ -178,15 +179,24 @@ void Raft::broadcast_heartbeat() {
       msg.from = id_;
       msg.to = peer_id;
       msg.term = term_;
-      if (log_.empty()) {
+
+      // Get the next index this peer needs
+      uint64_t next_index = progress_[peer_id].next;
+      uint64_t prev_index = next_index - 1;
+
+      msg.prev_log_index = prev_index;
+      if (prev_index == 0) {
         msg.prev_log_term = 0;
-        msg.prev_log_index = 0;
       } else {
-        // Get last entry from log
-        proto::Entry last_entry = log_[log_.size() - 1];
-        msg.prev_log_term = last_entry.term;
-        msg.prev_log_index = last_entry.index;
+        msg.prev_log_term =
+            log_[prev_index - 1].term; // Raft Logs are 1-indexed
       }
+
+      msg.entries.clear();
+      for (uint64_t i = next_index; i <= log_.size(); ++i) {
+        msg.entries.push_back(log_[i - 1]);
+      }
+
       msg.leader_commit = commit_index_;
       msgs_.push_back(msg);
     }
@@ -214,9 +224,44 @@ proto::Message Raft::handle_append_entries(const proto::Message &msg) {
   reset_randomized_election_timeout();
   lead_ = msg.from;
 
-  response.success = true;
+  // Log consistency check
+  bool log_ok = false;
+
+  if (msg.prev_log_index == 0) {
+    log_ok = true;
+  } else if (log_.size() >= msg.prev_log_index) {
+    log_ok = log_[msg.prev_log_index - 1].term == msg.prev_log_term;
+  }
+
   response.term = term_;
-  response.match_index = msg.prev_log_index;
+
+  if (!log_ok) {
+    response.match_index = 0;
+    return response;
+  }
+
+  // Append entries to follower's log (starting from the match_index + 1)
+  for (uint64_t i = 0; i < msg.entries.size(); ++i) {
+    uint64_t index = msg.prev_log_index + i + 1;
+
+    if (index <= log_.size()) {
+      if (log_[index - 1].term != msg.entries[i].term) {
+        // Conflict, need to remove the entries from index - 1 to the end
+        log_.erase(log_.begin() + index - 1, log_.end());
+        log_.push_back(msg.entries[i]);
+      }
+    } else {
+      log_.push_back(msg.entries[i]);
+    }
+  }
+
+  response.success = true;
+  response.match_index = msg.prev_log_index + msg.entries.size();
+
+  // Update commit index based on leader's commit
+  if (msg.leader_commit > commit_index_) {
+    commit_index_ = std::min(msg.leader_commit, static_cast<uint64_t>(log_.size()));
+  }
 
   return response;
 }
@@ -237,6 +282,28 @@ void Raft::handle_append_entries_response(const proto::Message &msg) {
   if (msg.success) {
     progress_[msg.from].match = msg.match_index;
     progress_[msg.from].next = progress_[msg.from].match + 1;
+
+    // Try to advance commit index
+    // Check each index from commit_index + 1 to log_.size()
+    for (uint64_t i = commit_index_ + 1; i <= log_.size(); ++i) {
+      // Only commit entries from current term
+      if (log_[i - 1].term != term_) {
+        continue;
+      }
+
+      // Count how many nodes have replicated this entry
+      uint64_t replicas = 1; // Count self
+      for (const auto &pair : progress_) {
+        if (pair.second.match >= i) {
+          replicas++;
+        }
+      }
+
+      // If majority has replicated, commit it
+      if (replicas > peers_.size() / 2) {
+        commit_index_ = i;
+      }
+    }
 
   } else {
     // Retry with lower index
