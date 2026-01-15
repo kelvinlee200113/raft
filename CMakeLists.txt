@@ -8,12 +8,19 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Find msgpack-cxx (header-only library for binary serialization)
+find_package(msgpack-cxx REQUIRED)
+
 # Include directories
 include_directories(src)
+# Add msgpack include directory (typically /opt/homebrew/include on macOS)
+include_directories(/opt/homebrew/include)
 
 # Create raft library (compile once, link many times)
 add_library(raft_lib STATIC
     src/raft/raft.cpp
+    src/server/kv_store.cpp
+    src/common/bytebuffer.cpp
 )
 
 # Add the main executable
@@ -37,5 +44,13 @@ add_test(NAME VotingTest COMMAND voting_test)
 add_executable(replication_test tests/replication_test.cpp)
 target_link_libraries(replication_test raft_lib GTest::gtest GTest::gtest_main)
 add_test(NAME ReplicationTest COMMAND replication_test)
+
+add_executable(kv_store_test tests/kv_store_test.cpp)
+target_link_libraries(kv_store_test raft_lib GTest::gtest GTest::gtest_main)
+add_test(NAME KVStoreTest COMMAND kv_store_test)
+
+add_executable(transport_proto_test tests/transport_proto_test.cpp)
+target_link_libraries(transport_proto_test raft_lib GTest::gtest GTest::gtest_main)
+add_test(NAME TransportProtoTest COMMAND transport_proto_test)
 
 
