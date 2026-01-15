@@ -56,5 +56,7 @@ struct Message {
         prev_log_term(0), leader_commit(0), success(false), match_index(0) {}
 };
 
+typedef std::shared_ptr<Message> MessagePtr;
+
 } // namespace proto
 } // namespace kv
