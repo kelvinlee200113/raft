@@ -93,21 +93,24 @@ public:
       }
 
       // Route message to Raft based on type
-      proto::Message response;
       switch (msg->type) {
       case proto::MsgRequestVote:
         std::cout << "Received RequestVote from " << msg->from
                   << " term=" << msg->term << std::endl;
-        response = raft_->handle_request_vote(*msg);
-        // Response is queued in raft's msgs_ (retrieved via read_messages())
+        {
+          proto::Message response = raft_->handle_request_vote(*msg);
+          raft_->send(response); // Queue response to be sent
+        }
         break;
 
       case proto::MsgAppendEntries:
         std::cout << "Received AppendEntries from " << msg->from
                   << " term=" << msg->term << " entries=" << msg->entries.size()
                   << std::endl;
-        response = raft_->handle_append_entries(*msg);
-        // Response is queued in raft's msgs_
+        {
+          proto::Message response = raft_->handle_append_entries(*msg);
+          raft_->send(response); // Queue response to be sent
+        }
         break;
 
       case proto::MsgRequestVoteResponse:

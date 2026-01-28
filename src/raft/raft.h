@@ -94,6 +94,7 @@ private:
   // Election timing
   uint32_t election_elapsed_;            // Ticks since last reset
   uint32_t randomized_election_timeout_; // Random timeout for this election
+  uint32_t heartbeat_elapsed_;           // Ticks since last heartbeat
 
   // Voting
   std::unordered_map<uint64_t, bool>

@@ -11,7 +11,7 @@ Raft::Raft(const Config &config)
       last_applied_(0), state_(State::Follower), peers_(config.peers),
       election_timeout_(config.election_tick),
       heartbeat_timeout_(config.heartbeat_tick), election_elapsed_(0),
-      randomized_election_timeout_(0) {
+      randomized_election_timeout_(0), heartbeat_elapsed_(0) {
 
   // Generate random election timeout (between election_timeout to
   // 2*election_timeout)
@@ -38,6 +38,7 @@ void Raft::become_candidate() {
 void Raft::become_leader() {
   state_ = State::Leader;
   lead_ = id_;
+  heartbeat_elapsed_ = 0; // Reset heartbeat timer
 
   // Remove stale data
   progress_.clear();
@@ -51,18 +52,32 @@ void Raft::become_leader() {
     progress.match = 0;
     progress_[peer_id] = progress;
   }
+
+  // Send initial heartbeat immediately
+  broadcast_heartbeat();
 }
 
 void Raft::tick() {
-  election_elapsed_++;
+  if (state_ == State::Leader) {
+    // Leader sends periodic heartbeats
+    heartbeat_elapsed_++;
+    if (heartbeat_elapsed_ >= heartbeat_timeout_) {
+      heartbeat_elapsed_ = 0;
+      broadcast_heartbeat();
+    }
+  } else {
+    // Followers and candidates track election timeout
+    election_elapsed_++;
 
-  // Check if election timeout has passed
-  if (election_elapsed_ >= randomized_election_timeout_) {
-    election_elapsed_ = 0;
+    // Check if election timeout has passed
+    if (election_elapsed_ >= randomized_election_timeout_) {
+      election_elapsed_ = 0;
 
-    // Only followers and candidates can start elections
-    if (state_ == State::Follower || state_ == State::Candidate) {
-      become_candidate();
+      // Only followers and candidates can start elections
+      if (state_ == State::Follower || state_ == State::Candidate) {
+        become_candidate();
+        campaign(); // Send RequestVote messages to all peers
+      }
     }
   }
 }
