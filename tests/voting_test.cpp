@@ -252,6 +252,9 @@ TEST_F(RaftVotingTest, LeaderBroadcastsHeartbeat) {
 
   EXPECT_EQ(raft.get_state(), kv::State::Leader);
 
+  // Clear initial heartbeat from become_leader()
+  raft.read_messages();
+
   // Broadcast heartbeat
   raft.broadcast_heartbeat();
 
