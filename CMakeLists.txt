@@ -59,4 +59,8 @@ add_executable(network_test tests/network_test.cpp)
 target_link_libraries(network_test raft_lib GTest::gtest GTest::gtest_main)
 add_test(NAME NetworkTest COMMAND network_test)
 
+add_executable(read_index_test tests/read_index_test.cpp)
+target_link_libraries(read_index_test raft_lib GTest::gtest GTest::gtest_main)
+add_test(NAME ReadIndexTest COMMAND read_index_test)
+
 

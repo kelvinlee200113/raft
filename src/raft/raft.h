@@ -55,6 +55,13 @@ public:
 
   void advance(uint64_t index);
 
+  // ReadIndex: Linearizable reads without going through the log
+  // Returns the commit index that can be safely read once confirmed
+  uint64_t read_index();
+
+  // Check if ReadIndex confirmation is ready (majority responded to heartbeat)
+  bool read_index_ready(uint64_t read_index);
+
   uint64_t get_term() const { return term_; }
   uint64_t get_id() const { return id_; }
   uint64_t get_leader() const { return lead_; }
@@ -99,6 +106,11 @@ private:
   // Voting
   std::unordered_map<uint64_t, bool>
       votes_; // Track votes received (node_id -> granted)
+
+  // ReadIndex state
+  bool read_index_pending_;               // Is there a pending ReadIndex request?
+  uint64_t pending_read_index_;           // Commit index when read was requested
+  std::unordered_map<uint64_t, bool> read_index_acks_;  // Track which peers acked
 
   // Outgoing messages queue
   std::vector<proto::Message> msgs_;

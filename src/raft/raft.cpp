@@ -11,7 +11,8 @@ Raft::Raft(const Config &config)
       last_applied_(0), state_(State::Follower), peers_(config.peers),
       election_timeout_(config.election_tick),
       heartbeat_timeout_(config.heartbeat_tick), election_elapsed_(0),
-      randomized_election_timeout_(0), heartbeat_elapsed_(0) {
+      randomized_election_timeout_(0), heartbeat_elapsed_(0),
+      read_index_pending_(false), pending_read_index_(0) {
 
   // Generate random election timeout (between election_timeout to
   // 2*election_timeout)
@@ -299,6 +300,11 @@ void Raft::handle_append_entries_response(const proto::Message &msg) {
     progress_[msg.from].match = msg.match_index;
     progress_[msg.from].next = progress_[msg.from].match + 1;
 
+    // Track successful heartbeat response for ReadIndex
+    if (read_index_pending_) {
+      read_index_acks_[msg.from] = true;
+    }
+
     // Try to advance commit index
     // Check each index from commit_index + 1 to log_.size()
     for (uint64_t i = commit_index_ + 1; i <= log_.size(); ++i) {
@@ -362,6 +368,50 @@ void Raft::advance(uint64_t index) {
     return;
   }
   last_applied_ = index;
+}
+
+// ReadIndex: Initiate a linearizable read
+// Returns the commit index that should be applied before reading
+uint64_t Raft::read_index() {
+  // Only leader can serve ReadIndex
+  if (state_ != State::Leader) {
+    return 0; // Not leader, can't serve reads
+  }
+
+  // Mark ReadIndex as pending
+  read_index_pending_ = true;
+  pending_read_index_ = commit_index_;
+  read_index_acks_.clear(); // Clear previous acks
+
+  // Send heartbeat to confirm leadership
+  broadcast_heartbeat();
+
+  return pending_read_index_;
+}
+
+// Check if ReadIndex is confirmed (majority acked heartbeat)
+bool Raft::read_index_ready(uint64_t read_index) {
+  if (state_ != State::Leader) {
+    return false;
+  }
+
+  // If this is not the pending read request, it's stale
+  if (read_index != pending_read_index_) {
+    return false;
+  }
+
+  // Need majority of peers to ack (including self)
+  uint64_t quorum = peers_.size() / 2 + 1;
+
+  // Count acks from unique peers (+ ourselves = 1)
+  uint64_t ack_count = 1; // Count self
+  for (const auto &ack : read_index_acks_) {
+    if (ack.second) {
+      ack_count++;
+    }
+  }
+
+  return ack_count >= quorum;
 }
 
 } // namespace kv
