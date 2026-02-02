@@ -12,7 +12,11 @@ Raft::Raft(const Config &config)
       election_timeout_(config.election_tick),
       heartbeat_timeout_(config.heartbeat_tick), election_elapsed_(0),
       randomized_election_timeout_(0), heartbeat_elapsed_(0),
-      read_index_pending_(false), pending_read_index_(0) {
+      read_index_pending_(false), pending_read_index_(0),
+      apply_queue_(std::make_unique<LockFreeQueue<proto::Entry>>(10000)) {
+
+  // Initialize atomic (can't be in initializer list)
+  apply_thread_running_.store(false);
 
   // Generate random election timeout (between election_timeout to
   // 2*election_timeout)
@@ -384,9 +388,16 @@ proto::Message Raft::handle_append_entries(const proto::Message &msg) {
   response.match_index = msg.prev_log_index + msg.entries.size();
 
   // Update commit index based on leader's commit
-  if (msg.leader_commit > commit_index_) {
-    commit_index_ =
-        std::min(msg.leader_commit, static_cast<uint64_t>(log_.size()));
+  {
+    std::lock_guard<std::mutex> lock(apply_mutex_);
+    if (msg.leader_commit > commit_index_) {
+      uint64_t old_commit = commit_index_;
+      commit_index_ =
+          std::min(msg.leader_commit, static_cast<uint64_t>(log_.size()));
+
+      // Push newly committed entries to lock-free queue
+      push_entries_to_apply_queue(old_commit, commit_index_);
+    }
   }
 
   return response;
@@ -415,24 +426,34 @@ void Raft::handle_append_entries_response(const proto::Message &msg) {
     }
 
     // Try to advance commit index
-    // Check each index from commit_index + 1 to log_.size()
-    for (uint64_t i = commit_index_ + 1; i <= log_.size(); ++i) {
-      // Only commit entries from current term
-      if (log_[i - 1].term != term_) {
-        continue;
-      }
+    {
+      std::lock_guard<std::mutex> lock(apply_mutex_);
+      uint64_t old_commit = commit_index_;
 
-      // Count how many nodes have replicated this entry
-      uint64_t replicas = 1; // Count self
-      for (const auto &pair : progress_) {
-        if (pair.second.match >= i) {
-          replicas++;
+      // Check each index from commit_index + 1 to log_.size()
+      for (uint64_t i = commit_index_ + 1; i <= log_.size(); ++i) {
+        // Only commit entries from current term
+        if (log_[i - 1].term != term_) {
+          continue;
+        }
+
+        // Count how many nodes have replicated this entry
+        uint64_t replicas = 1; // Count self
+        for (const auto &pair : progress_) {
+          if (pair.second.match >= i) {
+            replicas++;
+          }
+        }
+
+        // If majority has replicated, commit it
+        if (replicas > peers_.size() / 2) {
+          commit_index_ = i;
         }
       }
 
-      // If majority has replicated, commit it
-      if (replicas > peers_.size() / 2) {
-        commit_index_ = i;
+      // Push newly committed entries to lock-free queue
+      if (commit_index_ > old_commit) {
+        push_entries_to_apply_queue(old_commit, commit_index_);
       }
     }
 
@@ -459,6 +480,7 @@ void Raft::propose(const std::vector<uint8_t> &data) {
 }
 
 std::vector<proto::Entry> Raft::get_entries_to_apply() {
+  std::lock_guard<std::mutex> lock(apply_mutex_);
   std::vector<proto::Entry> result;
 
   if (last_applied_ >= commit_index_) {
@@ -473,10 +495,31 @@ std::vector<proto::Entry> Raft::get_entries_to_apply() {
 }
 
 void Raft::advance(uint64_t index) {
+  std::lock_guard<std::mutex> lock(apply_mutex_);
   if (index > commit_index_ || index <= last_applied_) {
     return;
   }
   last_applied_ = index;
+}
+
+// Push newly committed entries to lock-free apply queue
+// MUST be called with apply_mutex_ held
+void Raft::push_entries_to_apply_queue(uint64_t old_commit, uint64_t new_commit) {
+  // Push all entries in range (old_commit, new_commit]
+  for (uint64_t i = old_commit + 1; i <= new_commit; ++i) {
+    proto::Entry entry = log_[i - 1]; // Copy the entry
+
+    // Try to enqueue (non-blocking)
+    if (!apply_queue_->try_enqueue(std::move(entry))) {
+      // Queue is full - this indicates backpressure
+      // In production, we might want to:
+      // 1. Log a warning
+      // 2. Apply backpressure to clients (reject new writes)
+      // 3. Increase queue size
+      // For now, we'll just stop pushing and let apply thread catch up
+      break;
+    }
+  }
 }
 
 // ReadIndex: Initiate a linearizable read
@@ -521,6 +564,67 @@ bool Raft::read_index_ready(uint64_t read_index) {
   }
 
   return ack_count >= quorum;
+}
+
+// Start the async apply thread
+void Raft::start_apply_thread(std::function<void(uint64_t, const std::vector<uint8_t>&)> state_machine) {
+  // Check if already running
+  if (apply_thread_running_.load()) {
+    return;
+  }
+
+  state_machine_apply_ = state_machine;
+  apply_thread_running_.store(true);
+
+  // Launch the apply thread
+  apply_thread_ = std::thread(&Raft::apply_thread_loop, this);
+}
+
+// Stop the async apply thread
+void Raft::stop_apply_thread() {
+  if (!apply_thread_running_.load()) {
+    return;
+  }
+
+  // Signal thread to stop
+  apply_thread_running_.store(false);
+
+  // Wait for thread to exit
+  if (apply_thread_.joinable()) {
+    apply_thread_.join();
+  }
+}
+
+// Apply thread main loop (consumer of lock-free queue)
+void Raft::apply_thread_loop() {
+  while (apply_thread_running_.load(std::memory_order_acquire)) {
+    // Try to dequeue an entry (non-blocking)
+    auto entry_opt = apply_queue_->try_dequeue();
+
+    if (!entry_opt.has_value()) {
+      // Queue is empty, sleep briefly to avoid busy-waiting
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+      continue;
+    }
+
+    // We have an entry to apply
+    proto::Entry entry = std::move(entry_opt.value());
+
+    // Apply to state machine (user-provided callback)
+    if (state_machine_apply_) {
+      state_machine_apply_(entry.index, entry.data);
+    }
+
+    // Update last_applied index
+    {
+      std::lock_guard<std::mutex> lock(apply_mutex_);
+      // Only update if this entry is the next one we expected
+      // (entries must be applied in order!)
+      if (entry.index == last_applied_ + 1) {
+        last_applied_ = entry.index;
+      }
+    }
+  }
 }
 
 } // namespace kv

@@ -1,9 +1,14 @@
 #pragma once
 #include <raft/config.h>
 #include <raft/proto.h>
+#include <common/lock_free_queue.h>
 #include <stdint.h>
 #include <unordered_map>
 #include <vector>
+#include <mutex>
+#include <thread>
+#include <atomic>
+#include <functional>
 
 namespace kv {
 
@@ -59,9 +64,21 @@ public:
 
   void propose(const std::vector<uint8_t> &data);
 
+  // Legacy mutex-based API (for backward compatibility)
   std::vector<proto::Entry> get_entries_to_apply();
-
   void advance(uint64_t index);
+
+  // Lock-free API for high-performance async apply
+  // Returns pointer to apply queue (producer pushes, consumer pops)
+  LockFreeQueue<proto::Entry>* get_apply_queue() { return apply_queue_.get(); }
+
+  // Start the async apply thread
+  // state_machine: Callback function to apply an entry
+  // The callback receives (index, data) and should apply the entry to the state machine
+  void start_apply_thread(std::function<void(uint64_t, const std::vector<uint8_t>&)> state_machine);
+
+  // Stop the async apply thread (blocks until thread exits)
+  void stop_apply_thread();
 
   // ReadIndex: Linearizable reads without going through the log
   // Returns the commit index that can be safely read once confirmed
@@ -69,6 +86,19 @@ public:
 
   // Check if ReadIndex confirmation is ready (majority responded to heartbeat)
   bool read_index_ready(uint64_t read_index);
+
+  // Test helpers: For testing only
+  void test_set_commit_index(uint64_t index) {
+    std::lock_guard<std::mutex> lock(apply_mutex_);
+    uint64_t old_commit = commit_index_;
+    commit_index_ = index;
+    // Push newly committed entries to queue (for async apply)
+    if (index > old_commit) {
+      push_entries_to_apply_queue(old_commit, index);
+    }
+  }
+  void test_append_log_entry(const proto::Entry& entry) { log_.push_back(entry); }
+  size_t test_get_log_size() const { return log_.size(); }
 
   uint64_t get_term() const { return term_; }
   uint64_t get_id() const { return id_; }
@@ -91,6 +121,9 @@ public:
   const std::unordered_map<uint64_t, bool> &get_votes() const { return votes_; }
 
 private:
+  // Helper: Push newly committed entries to apply queue
+  // Must be called with apply_mutex_ held
+  void push_entries_to_apply_queue(uint64_t old_commit, uint64_t new_commit);
   uint64_t id_;
   uint64_t term_;
   uint64_t lead_;
@@ -124,6 +157,21 @@ private:
 
   // Outgoing messages queue
   std::vector<proto::Message> msgs_;
+
+  // Thread safety for async apply
+  mutable std::mutex apply_mutex_;  // Protects last_applied_ and commit_index_
+
+  // Lock-free queue for async apply (SPSC: Raft thread -> Apply thread)
+  // Capacity of 10000 entries (~10MB for typical entries)
+  std::unique_ptr<LockFreeQueue<proto::Entry>> apply_queue_;
+
+  // Async apply thread
+  std::thread apply_thread_;
+  std::atomic<bool> apply_thread_running_;
+  std::function<void(uint64_t, const std::vector<uint8_t>&)> state_machine_apply_;
+
+  // Apply thread main loop
+  void apply_thread_loop();
 };
 
 } // namespace kv

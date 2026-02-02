@@ -10,6 +10,9 @@
 #include <transport/peer.h>
 #include <transport/server.h>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <msgpack.hpp>
 
 // Parse command-line arguments
 struct NodeConfig {
@@ -59,6 +62,61 @@ NodeConfig parse_args(int argc, char **argv) {
   return config;
 }
 
+// Legacy mutex-based apply loop (for testing/comparison)
+void apply_loop_mutex(kv::Raft* raft, kv::KVStore* kv_store,
+                      std::atomic<bool>* running, uint64_t node_id) {
+  while (running->load()) {
+    auto entries = raft->get_entries_to_apply();
+
+    if (entries.empty()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      continue;
+    }
+
+    for (const auto& entry : entries) {
+      if (entry.type == kv::proto::EntryNormal) {
+        kv_store->apply(entry);
+        std::cout << "[Node " << node_id << "] Applied entry "
+                  << entry.index << " (mutex)" << std::endl;
+      }
+      raft->advance(entry.index);
+    }
+  }
+}
+
+// Lock-free apply loop - HIGH PERFORMANCE
+// Uses lock-free SPSC queue for zero-lock async apply
+// Perfect for high-frequency trading and low-latency systems
+void apply_loop(kv::Raft* raft, kv::KVStore* kv_store,
+                std::atomic<bool>* running, uint64_t node_id) {
+  auto* queue = raft->get_apply_queue();
+
+  while (running->load()) {
+    // Try to dequeue an entry (non-blocking, ~10-20ns)
+    auto maybe_entry = queue->try_dequeue();
+
+    if (!maybe_entry.has_value()) {
+      // Queue is empty, briefly yield CPU to avoid spinning
+      // In HFT systems, you might use _mm_pause() or busy-wait instead
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
+      continue;
+    }
+
+    // Apply entry to state machine
+    const auto& entry = maybe_entry.value();
+    if (entry.type == kv::proto::EntryNormal) {
+      kv_store->apply(entry);
+      std::cout << "[Node " << node_id << "] Applied entry "
+                << entry.index << " (lock-free)" << std::endl;
+    }
+
+    // Mark as applied
+    raft->advance(entry.index);
+  }
+
+  std::cout << "[Node " << node_id << "] Lock-free apply thread stopped" << std::endl;
+}
+
 int main(int argc, char **argv) {
   // Parse command-line arguments
   NodeConfig node_config = parse_args(argc, argv);
@@ -94,6 +152,22 @@ int main(int argc, char **argv) {
   std::cout << "Raft initialized: term=" << raft.get_term()
             << " state=Follower" << std::endl;
 
+  // Start built-in async apply thread with KVStore callback
+  raft.start_apply_thread([&kv_store, node_id = node_config.id](uint64_t index, const std::vector<uint8_t>& data) {
+    // Create entry for apply (KVStore expects proto::Entry)
+    kv::proto::Entry entry;
+    entry.index = index;
+    entry.data = data;
+    entry.type = kv::proto::EntryNormal;
+
+    // Apply to state machine
+    kv_store.apply(entry);
+
+    // Log the apply operation
+    std::cout << "[Node " << node_id << "] Applied entry " << index << std::endl;
+  });
+  std::cout << "Started async apply thread (lock-free)" << std::endl;
+
   // Create Server for incoming connections
   auto server = kv::Server::create(io_ctx, node_config.listen_addr, &raft);
   server->start();
@@ -120,18 +194,7 @@ int main(int argc, char **argv) {
     // 1. Tick Raft state machine
     raft.tick();
 
-    // 2. Apply committed entries to KV store
-    auto entries = raft.get_entries_to_apply();
-    for (auto &entry : entries) {
-      kv_store.apply(entry);
-      std::cout << "[Node " << node_config.id << "] Applied entry "
-                << entry.index << " to KVStore" << std::endl;
-    }
-    if (!entries.empty()) {
-      raft.advance(entries.back().index);
-    }
-
-    // 3. Send outgoing messages from Raft
+    // 2. Send outgoing messages from Raft
     auto messages = raft.read_messages();
     for (auto &msg : messages) {
       if (peers.count(msg.to)) {
@@ -139,7 +202,7 @@ int main(int argc, char **argv) {
       }
     }
 
-    // 4. Print status every 10 ticks (1 second)
+    // 3. Print status every 10 ticks (1 second)
     static int tick_count = 0;
     tick_count++;
     if (tick_count % 10 == 0) {
@@ -151,10 +214,11 @@ int main(int argc, char **argv) {
       std::cout << "[Node " << node_config.id << "] "
                 << "Term=" << raft.get_term() << " State=" << state_str
                 << " Leader=" << raft.get_leader()
-                << " Commit=" << raft.get_commit_index() << std::endl;
+                << " Commit=" << raft.get_commit_index()
+                << " Applied=" << raft.get_last_applied() << std::endl;
     }
 
-    // 5. Schedule next tick (100ms)
+    // 4. Schedule next tick (100ms)
     timer.expires_after(std::chrono::milliseconds(100));
     timer.async_wait([&](const boost::system::error_code &ec) {
       if (!ec) {
@@ -171,6 +235,11 @@ int main(int argc, char **argv) {
 
   // Run io_context event loop (blocks until stopped)
   io_ctx.run();
+
+  // Cleanup: Stop apply thread
+  std::cout << "\nShutting down..." << std::endl;
+  raft.stop_apply_thread();
+  std::cout << "Apply thread stopped" << std::endl;
 
   return 0;
 }

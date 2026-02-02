@@ -63,4 +63,12 @@ add_executable(read_index_test tests/read_index_test.cpp)
 target_link_libraries(read_index_test raft_lib GTest::gtest GTest::gtest_main)
 add_test(NAME ReadIndexTest COMMAND read_index_test)
 
+add_executable(async_apply_test tests/async_apply_test.cpp)
+target_link_libraries(async_apply_test raft_lib GTest::gtest GTest::gtest_main)
+add_test(NAME AsyncApplyTest COMMAND async_apply_test)
+
+add_executable(lock_free_queue_test tests/lock_free_queue_test.cpp)
+target_link_libraries(lock_free_queue_test raft_lib GTest::gtest GTest::gtest_main)
+add_test(NAME LockFreeQueueTest COMMAND lock_free_queue_test)
+
 
