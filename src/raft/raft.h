@@ -1,6 +1,7 @@
 #pragma once
 #include <raft/config.h>
 #include <raft/proto.h>
+#include <wal/wal.h>
 #include <common/lock_free_queue.h>
 #include <stdint.h>
 #include <unordered_map>
@@ -87,6 +88,9 @@ public:
   // Check if ReadIndex confirmation is ready (majority responded to heartbeat)
   bool read_index_ready(uint64_t read_index);
 
+  // Attach a WAL for crash recovery (optional — tests may omit this)
+  void set_wal(std::unique_ptr<wal::WAL> w) { wal_ = std::move(w); }
+
   // Test helpers: For testing only
   void test_set_commit_index(uint64_t index) {
     std::lock_guard<std::mutex> lock(apply_mutex_);
@@ -154,6 +158,9 @@ private:
   bool read_index_pending_;               // Is there a pending ReadIndex request?
   uint64_t pending_read_index_;           // Commit index when read was requested
   std::unordered_map<uint64_t, bool> read_index_acks_;  // Track which peers acked
+
+  // WAL for crash recovery (nullptr if not attached)
+  std::unique_ptr<wal::WAL> wal_;
 
   // Outgoing messages queue
   std::vector<proto::Message> msgs_;

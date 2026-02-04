@@ -146,6 +146,26 @@ int main(int argc, char **argv) {
   // Create Raft instance
   kv::Raft raft(raft_config);
 
+  // Create/open WAL for crash recovery
+  std::string wal_dir = "./wal_data/" + std::to_string(node_config.id);
+  auto wal_ptr = kv::wal::WAL::open(wal_dir);
+  if (!wal_ptr) {
+    // First run — no existing WAL, create fresh
+    wal_ptr = kv::wal::WAL::create(wal_dir);
+  } else {
+    // Recovering — replay WAL into Raft state
+    std::vector<kv::proto::Entry> entries;
+    auto hard_state = wal_ptr->recover(entries);
+    if (!hard_state.is_empty()) {
+      std::cout << "WAL recovered: term=" << hard_state.term
+                << " vote=" << hard_state.vote
+                << " commit=" << hard_state.commit
+                << " entries=" << entries.size() << std::endl;
+    }
+  }
+  raft.set_wal(std::move(wal_ptr));
+  std::cout << "WAL ready at " << wal_dir << std::endl;
+
   // Create KV store
   kv::KVStore kv_store;
 

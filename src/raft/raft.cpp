@@ -47,6 +47,12 @@ void Raft::become_candidate() {
   voted_for_ = id_;
   votes_.clear();
   reset_randomized_election_timeout();
+
+  // WAL-first: persist new term + self-vote before campaign() sends messages
+  if (wal_) {
+    wal_->save_hard_state({term_, voted_for_, commit_index_});
+    wal_->sync();
+  }
 }
 
 void Raft::become_leader() {
@@ -127,6 +133,12 @@ proto::Message Raft::handle_request_vote(const proto::Message &msg) {
     response.vote_granted = true;
     voted_for_ = msg.from;
     reset_randomized_election_timeout();
+
+    // WAL-first: persist vote before sending response
+    if (wal_) {
+      wal_->save_hard_state({term_, voted_for_, commit_index_});
+      wal_->sync();
+    }
   }
 
   // Set response term
@@ -378,10 +390,25 @@ proto::Message Raft::handle_append_entries(const proto::Message &msg) {
         // Conflict, need to remove the entries from index - 1 to the end
         log_.erase(log_.begin() + index - 1, log_.end());
         log_.push_back(msg.entries[i]);
+
+        // WAL: persist the new entry after conflict resolution
+        if (wal_) {
+          wal_->save_entry(msg.entries[i]);
+        }
       }
     } else {
       log_.push_back(msg.entries[i]);
+
+      // WAL: persist each new entry as it's appended
+      if (wal_) {
+        wal_->save_entry(msg.entries[i]);
+      }
     }
+  }
+
+  // WAL: flush all entries in one sync (batched)
+  if (wal_ && !msg.entries.empty()) {
+    wal_->sync();
   }
 
   response.success = true;
@@ -394,6 +421,12 @@ proto::Message Raft::handle_append_entries(const proto::Message &msg) {
       uint64_t old_commit = commit_index_;
       commit_index_ =
           std::min(msg.leader_commit, static_cast<uint64_t>(log_.size()));
+
+      // WAL: persist new commit index
+      if (wal_) {
+        wal_->save_hard_state({term_, voted_for_, commit_index_});
+        wal_->sync();
+      }
 
       // Push newly committed entries to lock-free queue
       push_entries_to_apply_queue(old_commit, commit_index_);
@@ -453,6 +486,12 @@ void Raft::handle_append_entries_response(const proto::Message &msg) {
 
       // Push newly committed entries to lock-free queue
       if (commit_index_ > old_commit) {
+        // WAL: persist new commit index before applying
+        if (wal_) {
+          wal_->save_hard_state({term_, voted_for_, commit_index_});
+          wal_->sync();
+        }
+
         push_entries_to_apply_queue(old_commit, commit_index_);
       }
     }
@@ -476,6 +515,13 @@ void Raft::propose(const std::vector<uint8_t> &data) {
   entry.term = term_;
 
   log_.push_back(entry);
+
+  // WAL: persist entry before broadcasting to followers
+  if (wal_) {
+    wal_->save_entry(entry);
+    wal_->sync();
+  }
+
   broadcast_heartbeat();
 }
 
