@@ -29,6 +29,8 @@ const MessageType MsgAppendEntries = 2;
 const MessageType MsgAppendEntriesResponse = 3;
 const MessageType MsgPreVote = 4;
 const MessageType MsgPreVoteResponse = 5;
+const MessageType MsgInstallSnapshot = 6;
+const MessageType MsgInstallSnapshotResponse = 7;
 
 // Message for RPC communication between nodes
 struct Message {
@@ -55,14 +57,21 @@ struct Message {
   bool success;
   uint64_t match_index; // index the follower successfully matched
 
+  // InstallSnapshot fields
+  uint64_t snapshot_index; // Last included index in the snapshot
+  uint64_t snapshot_term;  // Term of snapshot_index
+  std::vector<uint8_t> snapshot_data; // Serialized state machine state
+
   Message()
       : type(MsgRequestVote), from(0), to(0), term(0), last_log_index(0),
         last_log_term(0), vote_granted(false), prev_log_index(0),
-        prev_log_term(0), leader_commit(0), success(false), match_index(0) {}
+        prev_log_term(0), leader_commit(0), success(false), match_index(0),
+        snapshot_index(0), snapshot_term(0) {}
 
   MSGPACK_DEFINE(type, from, to, term, last_log_index, last_log_term,
                  vote_granted, prev_log_index, prev_log_term, entries,
-                 leader_commit, success, match_index);
+                 leader_commit, success, match_index, snapshot_index,
+                 snapshot_term, snapshot_data);
 };
 
 typedef std::shared_ptr<Message> MessagePtr;

@@ -43,6 +43,10 @@ public:
   // MUST call sync() before sending network messages!
   void save_entry(const proto::Entry& entry);
 
+  // Save snapshot to write buffer
+  // MUST call sync() before sending network messages!
+  void save_snapshot(const SnapshotMeta& snap);
+
   // Flush buffer to disk (fwrite + fsync)
   // BLOCKS until data is physically on disk
   // Returns: true on success, false on error
@@ -51,8 +55,9 @@ public:
   // Recover state from all WAL files in the directory
   // Reads records sequentially, validates CRC, stops at first corruption
   // entries: Output - recovered log entries in order
+  // snapshot: Output - last snapshot recovered (nullptr to skip)
   // Returns: Last valid HardState recovered
-  HardStateProto recover(std::vector<proto::Entry>& entries);
+  HardStateProto recover(std::vector<proto::Entry>& entries, SnapshotMeta* snapshot = nullptr);
 
   const std::string& get_dir() const { return dir_; }
 

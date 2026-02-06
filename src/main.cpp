@@ -13,6 +13,7 @@
 #include <thread>
 #include <atomic>
 #include <msgpack.hpp>
+#include <wal/proto.h>
 
 // Parse command-line arguments
 struct NodeConfig {
@@ -146,6 +147,9 @@ int main(int argc, char **argv) {
   // Create Raft instance
   kv::Raft raft(raft_config);
 
+  // Create KV store (before WAL recovery — we replay committed entries into it)
+  kv::KVStore kv_store;
+
   // Create/open WAL for crash recovery
   std::string wal_dir = "./wal_data/" + std::to_string(node_config.id);
   auto wal_ptr = kv::wal::WAL::open(wal_dir);
@@ -153,21 +157,46 @@ int main(int argc, char **argv) {
     // First run — no existing WAL, create fresh
     wal_ptr = kv::wal::WAL::create(wal_dir);
   } else {
-    // Recovering — replay WAL into Raft state
+    // Recovering — load Raft state, snapshot, and rebuild KV store
     std::vector<kv::proto::Entry> entries;
-    auto hard_state = wal_ptr->recover(entries);
-    if (!hard_state.is_empty()) {
-      std::cout << "WAL recovered: term=" << hard_state.term
-                << " vote=" << hard_state.vote
-                << " commit=" << hard_state.commit
-                << " entries=" << entries.size() << std::endl;
+    kv::wal::SnapshotMeta snapshot;
+    auto hard_state = wal_ptr->recover(entries, &snapshot);
+
+    // Load log + HardState into Raft
+    raft.restore(hard_state, entries);
+
+    // Rebuild state machine from snapshot + entries
+    uint64_t replay_from = 0;
+
+    if (!snapshot.is_empty()) {
+      // Restore KV store from snapshot
+      kv_store.deserialize(snapshot.state);
+      replay_from = snapshot.index;
+
+      std::cout << "Snapshot recovered: index=" << snapshot.index
+                << " term=" << snapshot.term
+                << " state_size=" << snapshot.state.size() << " bytes" << std::endl;
     }
+
+    // Replay entries AFTER the snapshot (entries with index > snapshot.index)
+    for (const auto& entry : entries) {
+      if (entry.index <= replay_from) continue;  // Skip entries covered by snapshot
+      if (entry.index > hard_state.commit) break;
+      if (entry.type == kv::proto::EntryNormal) {
+        kv_store.apply(entry);
+      }
+    }
+
+    // Mark replayed entries as applied
+    raft.advance(hard_state.commit);
+
+    std::cout << "WAL recovered: term=" << hard_state.term
+              << " vote=" << hard_state.vote
+              << " commit=" << hard_state.commit
+              << " entries=" << entries.size() << std::endl;
   }
   raft.set_wal(std::move(wal_ptr));
   std::cout << "WAL ready at " << wal_dir << std::endl;
-
-  // Create KV store
-  kv::KVStore kv_store;
 
   std::cout << "Raft initialized: term=" << raft.get_term()
             << " state=Follower" << std::endl;

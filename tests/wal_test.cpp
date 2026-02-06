@@ -237,3 +237,123 @@ TEST_F(WALTest, CorruptionStopsRecovery) {
   EXPECT_EQ(entries[0].index, 1u);
   EXPECT_EQ(entries[0].data, (std::vector<uint8_t>{0xAA, 0xBB}));
 }
+
+// ---------------------------------------------------------------------------
+// Test 6: Write a snapshot, close, reopen, recover — get it back exactly
+// ---------------------------------------------------------------------------
+TEST_F(WALTest, RecoverSnapshot) {
+  auto w = kv::wal::WAL::create(dir_);
+  ASSERT_NE(w, nullptr);
+
+  kv::wal::SnapshotMeta snap{/*index=*/10, /*term=*/3, /*state=*/{0x01, 0x02, 0x03}};
+  w->save_snapshot(snap);
+  ASSERT_TRUE(w->sync());
+  w.reset();
+
+  // --- recover ---
+  auto w2 = kv::wal::WAL::open(dir_);
+  ASSERT_NE(w2, nullptr);
+
+  std::vector<kv::proto::Entry> entries;
+  kv::wal::SnapshotMeta recovered;
+  auto hs = w2->recover(entries, &recovered);
+
+  EXPECT_TRUE(hs.is_empty());
+  EXPECT_TRUE(entries.empty());
+  EXPECT_EQ(recovered.index, 10u);
+  EXPECT_EQ(recovered.term,  3u);
+  EXPECT_EQ(recovered.state, (std::vector<uint8_t>{0x01, 0x02, 0x03}));
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Multiple snapshots → recover returns the LAST one
+// ---------------------------------------------------------------------------
+TEST_F(WALTest, LastSnapshotWins) {
+  auto w = kv::wal::WAL::create(dir_);
+  ASSERT_NE(w, nullptr);
+
+  w->save_snapshot(kv::wal::SnapshotMeta{5,  1, {0xAA}});
+  w->save_snapshot(kv::wal::SnapshotMeta{20, 4, {0xBB, 0xCC}});  // ← this one wins
+  ASSERT_TRUE(w->sync());
+  w.reset();
+
+  auto w2 = kv::wal::WAL::open(dir_);
+  ASSERT_NE(w2, nullptr);
+
+  std::vector<kv::proto::Entry> entries;
+  kv::wal::SnapshotMeta recovered;
+  w2->recover(entries, &recovered);
+
+  EXPECT_EQ(recovered.index, 20u);
+  EXPECT_EQ(recovered.term,  4u);
+  EXPECT_EQ(recovered.state, (std::vector<uint8_t>{0xBB, 0xCC}));
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Realistic recovery: entries before snapshot, snapshot, entries after.
+//         All records come back; caller filters entries > snapshot.index.
+// ---------------------------------------------------------------------------
+TEST_F(WALTest, SnapshotWithEntriesAndHardState) {
+  auto w = kv::wal::WAL::create(dir_);
+  ASSERT_NE(w, nullptr);
+
+  // Entries 1-3 (will be baked into the snapshot)
+  for (int i = 1; i <= 3; i++) {
+    kv::proto::Entry e;
+    e.term  = 1;
+    e.index = static_cast<uint64_t>(i);
+    e.data  = {static_cast<uint8_t>(i * 10)};
+    w->save_entry(e);
+  }
+
+  // Snapshot at index 3 — captures state after entries 1-3
+  w->save_snapshot(kv::wal::SnapshotMeta{3, 1, {0xDE, 0xAD}});
+
+  // HardState reflecting commit up to 5
+  w->save_hard_state(kv::wal::HardStateProto{2, 1, 5});
+
+  // Entries 4-5 (after the snapshot, need replay)
+  for (int i = 4; i <= 5; i++) {
+    kv::proto::Entry e;
+    e.term  = 2;
+    e.index = static_cast<uint64_t>(i);
+    e.data  = {static_cast<uint8_t>(i * 10)};
+    w->save_entry(e);
+  }
+
+  ASSERT_TRUE(w->sync());
+  w.reset();
+
+  // --- recover ---
+  auto w2 = kv::wal::WAL::open(dir_);
+  ASSERT_NE(w2, nullptr);
+
+  std::vector<kv::proto::Entry> entries;
+  kv::wal::SnapshotMeta snap;
+  auto hs = w2->recover(entries, &snap);
+
+  // HardState
+  EXPECT_EQ(hs.term,   2u);
+  EXPECT_EQ(hs.commit, 5u);
+
+  // Snapshot
+  EXPECT_EQ(snap.index, 3u);
+  EXPECT_EQ(snap.term,  1u);
+  EXPECT_EQ(snap.state, (std::vector<uint8_t>{0xDE, 0xAD}));
+
+  // All 5 entries come back raw — caller is responsible for skipping <= snap.index
+  ASSERT_EQ(entries.size(), 5u);
+
+  // Simulate what main.cpp would do: only replay entries after snapshot
+  std::vector<kv::proto::Entry> to_replay;
+  for (const auto& e : entries) {
+    if (e.index > snap.index) {
+      to_replay.push_back(e);
+    }
+  }
+  ASSERT_EQ(to_replay.size(), 2u);
+  EXPECT_EQ(to_replay[0].index, 4u);
+  EXPECT_EQ(to_replay[0].data,  (std::vector<uint8_t>{40}));
+  EXPECT_EQ(to_replay[1].index, 5u);
+  EXPECT_EQ(to_replay[1].data,  (std::vector<uint8_t>{50}));
+}

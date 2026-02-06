@@ -23,6 +23,7 @@ add_library(raft_lib STATIC
     src/common/bytebuffer.cpp
     src/transport/peer.cpp
     src/transport/server.cpp
+    src/wal/wal.cpp
 )
 
 # Add the main executable
@@ -70,5 +71,9 @@ add_test(NAME AsyncApplyTest COMMAND async_apply_test)
 add_executable(lock_free_queue_test tests/lock_free_queue_test.cpp)
 target_link_libraries(lock_free_queue_test raft_lib GTest::gtest GTest::gtest_main)
 add_test(NAME LockFreeQueueTest COMMAND lock_free_queue_test)
+
+add_executable(wal_test tests/wal_test.cpp)
+target_link_libraries(wal_test raft_lib GTest::gtest GTest::gtest_main)
+add_test(NAME WALTest COMMAND wal_test)
 
 

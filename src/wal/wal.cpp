@@ -224,6 +224,16 @@ void WAL::save_entry(const proto::Entry& entry) {
                 sbuf.size());
 }
 
+void WAL::save_snapshot(const SnapshotMeta& snap) {
+  if (snap.is_empty()) return;
+
+  msgpack::sbuffer sbuf;
+  msgpack::pack(sbuf, snap);
+  append_record(RecordType::Snapshot,
+                reinterpret_cast<const uint8_t*>(sbuf.data()),
+                sbuf.size());
+}
+
 bool WAL::sync() {
   if (buffer_.empty()) return true;
 
@@ -245,7 +255,7 @@ bool WAL::sync() {
 // ---------------------------------------------------------------------------
 // Recovery: read all WAL files sequentially, validate CRC, stop at corruption
 // ---------------------------------------------------------------------------
-HardStateProto WAL::recover(std::vector<proto::Entry>& entries) {
+HardStateProto WAL::recover(std::vector<proto::Entry>& entries, SnapshotMeta* snapshot) {
   HardStateProto hs;
   auto names = list_wal_files(dir_);
 
@@ -313,8 +323,16 @@ HardStateProto WAL::recover(std::vector<proto::Entry>& entries) {
           entries.push_back(std::move(entry));
           break;
         }
+        case RecordType::Snapshot: {
+          if (snapshot) {
+            msgpack::object_handle oh = msgpack::unpack(
+                reinterpret_cast<const char*>(payload), hdr.len);
+            oh.get().convert(*snapshot);
+          }
+          break;
+        }
         default:
-          // Skip unknown record types (e.g. CRCRecord, Snapshot placeholders)
+          // Skip unknown record types (e.g. CRCRecord)
           break;
       }
     }

@@ -17,6 +17,10 @@ public:
   void del(const std::string &key);
   void apply(const proto::Entry &entry);
 
+  // Snapshot support: serialize entire store to bytes / replace store from bytes
+  std::vector<uint8_t> serialize() const;
+  void deserialize(const std::vector<uint8_t>& data);
+
 private:
   std::unordered_map<std::string, std::string> store_;
 };

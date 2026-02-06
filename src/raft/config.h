@@ -9,8 +9,9 @@ struct Config {
     std::vector<uint64_t> peers;
     uint32_t election_tick;
     uint32_t heartbeat_tick;
+    uint64_t snapshot_threshold;  // Take snapshot every N applied entries (0 = disabled)
 
-    Config() : id(0), election_tick(10), heartbeat_tick(1) {}
+    Config() : id(0), election_tick(10), heartbeat_tick(1), snapshot_threshold(100) {}
 };
 
 

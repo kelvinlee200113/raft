@@ -140,6 +140,21 @@ public:
         raft_->handle_append_entries_response(*msg);
         break;
 
+      case proto::MsgInstallSnapshot:
+        std::cout << "Received InstallSnapshot from " << msg->from
+                  << " index=" << msg->snapshot_index << std::endl;
+        {
+          proto::Message response = raft_->handle_install_snapshot(*msg);
+          raft_->send(response); // Queue response to be sent
+        }
+        break;
+
+      case proto::MsgInstallSnapshotResponse:
+        std::cout << "Received InstallSnapshotResponse from " << msg->from
+                  << " success=" << msg->success << std::endl;
+        raft_->handle_install_snapshot_response(*msg);
+        break;
+
       default:
         std::cerr << "Unknown message type: " << (int)msg->type << std::endl;
         break;

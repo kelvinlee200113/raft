@@ -43,4 +43,18 @@ void KVStore::apply(const proto::Entry &entry) {
   }
 }
 
+std::vector<uint8_t> KVStore::serialize() const {
+  msgpack::sbuffer sbuf;
+  msgpack::pack(sbuf, store_);
+  return std::vector<uint8_t>(
+      reinterpret_cast<const uint8_t*>(sbuf.data()),
+      reinterpret_cast<const uint8_t*>(sbuf.data()) + sbuf.size());
+}
+
+void KVStore::deserialize(const std::vector<uint8_t>& data) {
+  msgpack::object_handle oh = msgpack::unpack(
+      reinterpret_cast<const char*>(data.data()), data.size());
+  oh.get().convert(store_);
+}
+
 } // namespace kv

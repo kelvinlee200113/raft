@@ -12,7 +12,7 @@ enum RecordType : uint8_t {
   Entry = 1,        // Log entry
   HardState = 2,    // Raft critical state (term, vote, commit)
   CRCRecord = 3,    // CRC for corruption detection
-  Snapshot = 4      // Snapshot metadata (not implemented yet)
+  Snapshot = 4      // Snapshot (index, term, serialized state machine)
 };
 
 // HardState: Critical Raft state that must survive crashes
@@ -43,6 +43,23 @@ struct HardStateProto {
   }
 
   MSGPACK_DEFINE(term, vote, commit);
+};
+
+// SnapshotMeta: persisted snapshot of the state machine
+// index + term identify the exact log position baked into this snapshot.
+// state is an opaque blob — only the state machine (KVStore) knows how to read it.
+struct SnapshotMeta {
+  uint64_t index;                // Last log index included in this snapshot
+  uint64_t term;                 // Term of that log entry
+  std::vector<uint8_t> state;   // Serialized state machine
+
+  SnapshotMeta() : index(0), term(0) {}
+  SnapshotMeta(uint64_t i, uint64_t t, std::vector<uint8_t> s)
+      : index(i), term(t), state(std::move(s)) {}
+
+  bool is_empty() const { return index == 0 && term == 0 && state.empty(); }
+
+  MSGPACK_DEFINE(index, term, state);
 };
 
 // WAL record header (8 bytes)
